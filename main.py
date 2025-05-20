@@ -9,6 +9,7 @@ from firebase_admin import credentials
 from firebase_admin import db
 import os 
 import uuid
+from fastapi.responses import JSONResponse
 
 app = FastAPI(  
     title="AyurLanka Admin",
@@ -70,6 +71,7 @@ class Product(BaseModel):
     category: int
     imgPath: str
     description: str
+    rating: Optional[str]   
 
 @app.post("/add-product")
 def add_product(product: Product):
@@ -92,14 +94,32 @@ def add_product(product: Product):
 @app.get("/products")
 def get_products():
     try:
-        ref = db.reference('/products')
-        snapshot = ref.get()
-        if snapshot is None:
-            return []
-        return [Product(**data) for _, data in snapshot.items()]
-    except Exception as e:
-        return {"message": f"Error getting products: {e}", "status": "error"}, 500
+        ref = db.reference("products")
+        products = ref.get()
 
+        if not products:
+            return JSONResponse(content=[], status_code=200)
+
+        fixed_products = []
+        for key, product in products.items():
+            # 🛠️ Patch 'rating' if it's missing
+            if 'rating' not in product:
+                product['rating'] = None
+                ref.child(key).update({'rating': None})
+            fixed_products.append(product)
+
+        return JSONResponse(content=fixed_products, status_code=200)
+
+    except Exception as e:
+        return JSONResponse(
+            content={
+                "message": f"Error getting products: {str(e)}",
+                "status": "error"
+            },
+            status_code=500
+        )
+        
+        
 @app.delete("/delete-product/{product_id}")
 def delete_product(product_id: int):
     try:
@@ -156,10 +176,7 @@ def add_order(order: Order):
         return {"message": f"Error placing order: {e}", "status": "error"}, 500
     
 # --- PRACTITIONERS ---
-practitioners = [
-    {"id": 1, "name": "Dr. Nimal", "contact": "0771234567"},
-    {"id": 2, "name": "Dr. Kavindi", "contact": "0767654321"}
-]
+
 class Practitioner(BaseModel):
     id: int | None = None  # 🧠 Make ID optional so we assign it manually
     name: str
@@ -275,12 +292,33 @@ def submit_form(data: UserForm):
     print(f"Form from {data.name}: {data.message}")
     return {"message": "Form received homie 🎯"}
 
-# --- FEEDBACK ---
-class Feedback(BaseModel):
+
+class PredictRequest(BaseModel):
+    productId: int
     feedback: str
 
 @app.post("/predict")
-def predict(data: Feedback):
-    vect = vectorizer.transform([data.feedback])
-    pred = model.predict(vect)[0]
-    return {"result": pred}
+def predict_sentiment(req: PredictRequest):
+    try:
+        # 🧠 Predict
+        transformed = vectorizer.transform([req.feedback])
+        prediction = model.predict(transformed)[0]
+        
+        # 🔥 Update product rating in Firebase
+        ref = db.reference('/products')
+        all_data = ref.get()
+        if not all_data:
+            raise HTTPException(status_code=404, detail="No products found.")
+        
+        for key, val in all_data.items():
+            if val["id"] == req.productId:
+                ref.child(key).update({"rating": prediction})
+                return {
+                    "message": f"Rating updated homie 🧼",
+                    "productId": req.productId,
+                    "predicted_sentiment": prediction
+                }
+        
+        raise HTTPException(status_code=404, detail="Product not found.")
+    except Exception as e:
+        return {"message": f"Error updating rating: {e}", "status": "error"}, 500
